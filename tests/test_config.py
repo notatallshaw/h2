@@ -4,10 +4,18 @@ Test the configuration object.
 from __future__ import annotations
 
 import logging
+from io import StringIO
+from typing import TYPE_CHECKING
 
 import pytest
+from hyperframe.frame import Frame
 
 import h2.config
+import h2.connection
+import h2.events
+
+if TYPE_CHECKING:
+    from . import helpers
 
 
 class TestH2Config:
@@ -141,3 +149,45 @@ class TestH2Config:
             assert "h2 (trace): This is a trace message 123.\n" in captured.err
         else:
             assert "h2 (trace): This is a trace message 123.\n" not in captured.err
+
+
+@pytest.mark.parametrize("output_logger", [False, True])
+def test_disabled_trace_does_not_render_received_frames(
+    monkeypatch: pytest.MonkeyPatch,
+    output_logger: bool,
+    frame_factory: helpers.FrameFactory,
+) -> None:
+    """Receiving a real SETTINGS frame does no disabled formatting work."""
+    rendered: list[str] = []
+    original = Frame.__repr__
+
+    def observe(frame: Frame) -> str:
+        rendered.append(type(frame).__name__)
+        return original(frame)
+
+    monkeypatch.setattr(Frame, "__repr__", observe)
+    logger = h2.config.OutputLogger(trace_level=False) if output_logger else h2.config.DummyLogger()
+    connection = h2.connection.H2Connection(config=h2.config.H2Configuration(logger=logger))
+    connection.initiate_connection()
+
+    events = connection.receive_data(frame_factory.build_settings_frame({}).serialize())
+
+    assert len(events) == 1
+    assert isinstance(events[0], h2.events.RemoteSettingsChanged)
+    assert not rendered
+
+
+def test_enabled_trace_preserves_received_frame_representation(frame_factory: helpers.FrameFactory) -> None:
+    """Trace output still includes the parsed frame's complete representation."""
+    output = StringIO()
+    logger = h2.config.OutputLogger(file=output, trace_level=True)
+    connection = h2.connection.H2Connection(config=h2.config.H2Configuration(logger=logger))
+    connection.initiate_connection()
+    frame = frame_factory.build_settings_frame({})
+    expected = f"h2 (trace): Received frame: {frame!r}\n"
+
+    events = connection.receive_data(frame.serialize())
+
+    assert len(events) == 1
+    assert isinstance(events[0], h2.events.RemoteSettingsChanged)
+    assert expected in output.getvalue().splitlines(keepends=True)
